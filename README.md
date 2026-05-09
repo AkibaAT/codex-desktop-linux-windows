@@ -115,6 +115,35 @@ sudo usermod -a -G input "$USER"
 
 On Ubuntu 24.04, the `ydotoold` package may install `/usr/bin/ydotoold` without a systemd unit. In that case, create or install a `ydotoold.service` unit before running `systemctl enable --now ydotoold`.
 
+If `doctor` reports `ydotoold` as running but `ydotool_socket` is `Permission denied`, the daemon is reachable only by root. This unit keeps the daemon privileged enough to open `/dev/uinput`, but makes the socket usable by desktop users in the `input` group:
+
+```ini
+[Unit]
+Description=ydotool daemon
+Documentation=man:ydotool(1)
+After=multi-user.target
+
+[Service]
+Type=simple
+Group=input
+UMask=0007
+ExecStartPre=/usr/bin/rm -f /tmp/.ydotool_socket
+ExecStart=/usr/bin/ydotoold
+ExecStartPost=/bin/sh -c 'for i in $(seq 1 50); do [ -S /tmp/.ydotool_socket ] && chgrp input /tmp/.ydotool_socket && chmod 0660 /tmp/.ydotool_socket && exit 0; sleep 0.1; done; exit 1'
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Save it as `/etc/systemd/system/ydotoold.service`, then run:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now ydotoold
+```
+
 A working XDG Desktop Portal implementation is needed if you are not on GNOME — `xdg-desktop-portal-kde` for KDE Plasma, `xdg-desktop-portal-wlr` for sway / Hyprland, or your distro's preferred portal backend for i3. GNOME ships a working portal by default.
 
 ### Verifying readiness
@@ -364,6 +393,7 @@ make clean-state
 | Stale install / cached DMG | `./install.sh --fresh` removes the existing install dir and re-downloads |
 | Computer Use plugin invisible in UI | Most likely the OpenAI per-account Statsig rollout (`computerUse` feature flag) hasn't been enabled for your account. Building / reinstalling does not change this |
 | Computer Use `doctor` reports `ydotool not running` | `sudo systemctl enable --now ydotoold` and add your user to the `input` group |
+| Computer Use `doctor` reports `ydotool_socket: Permission denied` | The daemon socket is root-only. Use the `ydotoold.service` example above so `/tmp/.ydotool_socket` becomes `root:input` with `0660` permissions |
 | `ConnectTimeoutError` for `www.electronjs.org` during `@electron/rebuild` | Re-run `make build-app`; the installer now uses `https://artifacts.electronjs.org/headers/dist` for Electron headers by default |
 | Computer Use AT-SPI tree empty | Run `codex-computer-use-linux setup` to flip GNOME accessibility on, then restart the target app |
 | `codex-update-manager` keeps running after package removal | `systemctl --user disable --now codex-update-manager.service` once in the affected session, then confirm `/opt/codex-desktop` is gone |

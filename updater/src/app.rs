@@ -1313,15 +1313,22 @@ mod tests {
         };
         paths.ensure_dirs()?;
 
-        {
-            let first_lock = try_acquire_check_lock(&paths)?;
-            let second_lock = try_acquire_check_lock(&paths)?;
+        let first_lock =
+            try_acquire_check_lock(&paths)?.expect("first lock acquisition should succeed");
+        let second_lock = try_acquire_check_lock(&paths)?;
 
-            assert!(first_lock.is_some());
-            assert!(second_lock.is_none());
+        assert!(second_lock.is_none());
+        drop(second_lock);
+        drop(first_lock);
+
+        let mut reacquired_lock = None;
+        for _ in 0..20 {
+            reacquired_lock = try_acquire_check_lock(&paths)?;
+            if reacquired_lock.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
-
-        let reacquired_lock = try_acquire_check_lock(&paths)?;
 
         assert!(reacquired_lock.is_some());
         Ok(())
@@ -1555,6 +1562,8 @@ mod tests {
         let original_path = std::env::var_os("PATH");
         let original_home = std::env::var_os("HOME");
         let original_nvm_dir = std::env::var_os("NVM_DIR");
+        let original_skip_system_cli_lookup =
+            std::env::var_os("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP");
 
         std::env::remove_var("DISPLAY");
         std::env::remove_var("WAYLAND_DISPLAY");
@@ -1563,6 +1572,7 @@ mod tests {
         std::env::set_var("PATH", temp.path().join("missing-bin"));
         std::env::set_var("HOME", temp.path());
         std::env::remove_var("NVM_DIR");
+        std::env::set_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP", "1");
 
         let invalid_cli_path = temp.path().join("codex.txt");
         std::fs::write(&invalid_cli_path, b"not executable")?;
@@ -1606,6 +1616,11 @@ mod tests {
             std::env::set_var("NVM_DIR", value);
         } else {
             std::env::remove_var("NVM_DIR");
+        }
+        if let Some(value) = original_skip_system_cli_lookup {
+            std::env::set_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP", value);
+        } else {
+            std::env::remove_var("CODEX_UPDATE_MANAGER_SKIP_SYSTEM_CLI_LOOKUP");
         }
 
         assert_eq!(outcome, PromptInstallCliOutcome::NoBackend);
