@@ -403,8 +403,14 @@ test("open-target discovery sanitizes desktop launch environment", async () => {
         XDG_DATA_DIRS: path.join(tmp, "empty"),
         CHROME_DESKTOP: "codex-open-target-launchers.desktop",
         ELECTRON_RENDERER_URL: "http://127.0.0.1:5203/",
-        CODEX_ELECTRON_USER_DATA_DIR: path.join(tmp, "codex-user-data"),
-        CODEX_LINUX_APP_ID: "codex-open-target-launchers",
+        CODEX_ELECTRON_USER_DATA_DIR: path.join(
+          tmp,
+          ".local",
+          "state",
+          "codex-open-target-launchers",
+          "electron-user-data",
+        ),
+        XDG_CONFIG_HOME: path.join(tmp, ".local", "state", "codex-open-target-launchers", "xdg-config"),
       },
       "Xg.find((target)=>target.platforms.linux?.label===`Workspace Agent`).platforms.linux",
       spawnRecorder,
@@ -418,6 +424,54 @@ test("open-target discovery sanitizes desktop launch environment", async () => {
     assert.equal(spawnRecorder.calls[0].options.env.ELECTRON_RENDERER_URL, undefined);
     assert.equal(spawnRecorder.calls[0].options.env.CODEX_ELECTRON_USER_DATA_DIR, undefined);
     assert.equal(spawnRecorder.calls[0].options.env.CODEX_LINUX_APP_ID, undefined);
+    assert.equal(spawnRecorder.calls[0].options.env.XDG_CONFIG_HOME, undefined);
+  });
+});
+
+test("open-target discovery preserves user-scoped XDG_CONFIG_HOME", async () => {
+  await withTempDir(async (tmp) => {
+    const dataHome = path.join(tmp, "share");
+    const appsDir = path.join(dataHome, "applications");
+    const binDir = path.join(tmp, "bin");
+    const gio = makeExecutable(binDir, "gio");
+    const editorCommand = makeExecutable(path.join(tmp, "toolbox", "bin"), "workspace-agent");
+    const desktopFile = path.join(appsDir, "workspace-agent.desktop");
+    const projectDir = path.join(tmp, "project");
+    const userConfigHome = path.join(tmp, "user-config");
+    const spawnRecorder = createSpawnRecorder({ recordOptions: true });
+    fs.mkdirSync(appsDir, { recursive: true });
+    fs.mkdirSync(projectDir, { recursive: true });
+    fs.writeFileSync(
+      desktopFile,
+      [
+        "[Desktop Entry]",
+        "Type=Application",
+        "Name=Workspace Agent",
+        `Exec=${editorCommand} %U`,
+        "Categories=Development;",
+        "Comment=Coordinate coding agents across workspaces",
+      ].join("\n"),
+    );
+
+    const platform = evaluatePatched(
+      openTargetsBundle,
+      {
+        HOME: tmp,
+        PATH: `${binDir}:${path.dirname(editorCommand)}`,
+        XDG_CONFIG_HOME: userConfigHome,
+        XDG_DATA_HOME: dataHome,
+        XDG_DATA_DIRS: path.join(tmp, "empty"),
+        CODEX_ELECTRON_USER_DATA_DIR: path.join(tmp, "codex-user-data"),
+      },
+      "Xg.find((target)=>target.platforms.linux?.label===`Workspace Agent`).platforms.linux",
+      spawnRecorder,
+    );
+
+    await platform.open({ command: editorCommand, path: projectDir });
+
+    assert.equal(spawnRecorder.calls[0].command, gio);
+    assert.equal(spawnRecorder.calls[0].options.env.CODEX_ELECTRON_USER_DATA_DIR, undefined);
+    assert.equal(spawnRecorder.calls[0].options.env.XDG_CONFIG_HOME, userConfigHome);
   });
 });
 
