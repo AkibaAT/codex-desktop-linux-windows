@@ -1,26 +1,17 @@
 "use strict";
 
+const fs = require("node:fs");
+const path = require("node:path");
 const { requireName } = require("../../scripts/patches/shared.js");
 
-// A SEPARATE in-app update button for the *wrapper* (this repo's own Linux
-// features/fixes), distinct from the upstream Codex DMG "Sparkle" button. It
-// reads the wrapper-update fields that `codex-update-manager` records in
-// state.json and is invisible unless a wrapper update is pending. Clicking it
-// writes a `wrapper-update-pending` marker and quits; the launcher applies the
-// update on the next start.
-
 const HANDLER_NAME = "codex-linux-wrapper-updater";
-const RUNTIME_VERSION = "codex-wrapper-updater-v1";
+const RUNTIME_VERSION = "codex-wrapper-updater-v2";
+const KEYBINDS_ASSET = "keybinds-settings-linux.js";
+const WRAPPER_UPDATES_SETTING_KEY = "codex-linux-wrapper-updates-enabled";
 
 function warn(message, patchName) {
   console.warn(`WARN: ${message} - skipping ${patchName}`);
 }
-
-// ---------------------------------------------------------------------------
-// Main bundle: register a handler at vscode://codex/codex-linux-wrapper-updater
-// that the renderer-side button calls. Mirrors the DMG codex-updater handler
-// but reads the wrapper-axis state fields and writes a distinct marker.
-// ---------------------------------------------------------------------------
 
 function applyMainBundlePatch(source) {
   if (source.includes(`"${HANDLER_NAME}":async`)) {
@@ -29,37 +20,30 @@ function applyMainBundlePatch(source) {
 
   const fsVar = requireName(source, "node:fs");
   const pathVar = requireName(source, "node:path");
-  const osVar = requireName(source, "node:os") ?? requireName(source, "os");
   const childProcessVar =
     requireName(source, "node:child_process") ?? requireName(source, "child_process");
-  if (fsVar == null || pathVar == null || osVar == null || childProcessVar == null) {
+  if (fsVar == null || pathVar == null || childProcessVar == null) {
     warn(
-      "Could not find node:fs/node:path/node:os/node:child_process deps",
+      "Could not find node:fs/node:path/node:child_process deps",
       "codex wrapper updater main-bundle patch",
     );
     return source;
   }
 
   const helper = [
-    `function codexLinuxWrapHome(){return process.env.HOME||${osVar}.homedir?.()||\`\`}`,
+    `function codexLinuxWrapHome(){return process.env.HOME||\`\`}`,
+    `function codexLinuxWrapAppId(){let i=process.env.CODEX_LINUX_APP_ID||process.env.CODEX_APP_ID||\`codex-desktop\`;return /^[A-Za-z0-9._-]+$/.test(i)?i:\`codex-desktop\`}`,
+    `function codexLinuxWrapAppStateDir(){let e=process.env.CODEX_LINUX_APP_STATE_DIR;if(typeof e===\`string\`&&e.trim())return e;let h=codexLinuxWrapHome();let r=process.env.XDG_STATE_HOME||(h&&${pathVar}.join(h,\`.local\`,\`state\`));return r?${pathVar}.join(r,codexLinuxWrapAppId()):null}`,
     `function codexLinuxWrapStatePath(){let h=codexLinuxWrapHome();let d=process.env.XDG_STATE_HOME||(h&&${pathVar}.join(h,\`.local\`,\`state\`));return d?${pathVar}.join(d,\`codex-update-manager\`,\`state.json\`):null}`,
-    `function codexLinuxWrapMarkerPath(){let h=codexLinuxWrapHome();let d=process.env.XDG_STATE_HOME||(h&&${pathVar}.join(h,\`.local\`,\`state\`));return d?${pathVar}.join(d,\`codex-desktop\`,\`wrapper-update-pending\`):null}`,
+    `function codexLinuxWrapMarkerPath(){let d=codexLinuxWrapAppStateDir();return d?${pathVar}.join(d,\`codex-wrapper-updater\`,\`pending\`):null}`,
     `function codexLinuxWrapReadStatus(){try{let p=codexLinuxWrapStatePath();if(!p||!${fsVar}.existsSync(p))return null;return JSON.parse(${fsVar}.readFileSync(p,\`utf8\`))}catch{return null}}`,
-    `function codexLinuxWrapShouldShow(s){if(!s||typeof s!==\`object\`)return!1;if(s.wrapper_status===\`applying\`)return!0;return typeof s.candidate_wrapper_commit===\`string\`&&s.candidate_wrapper_commit.length>0}`,
-    `function codexLinuxWrapStatusPayload(){let s=codexLinuxWrapReadStatus();return{ok:!0,show:codexLinuxWrapShouldShow(s),working:s&&s.wrapper_status===\`applying\`,changelog:s?s.wrapper_changelog||\`\`:\`\`,commit:s?s.candidate_wrapper_commit||\`\`:\`\`}}`,
+    `function codexLinuxWrapShouldShow(s){return !!(s&&typeof s===\`object\`&&typeof s.candidate_wrapper_commit===\`string\`&&s.candidate_wrapper_commit.length>0)}`,
+    `function codexLinuxWrapStatusPayload(){let s=codexLinuxWrapReadStatus();return{ok:!0,show:codexLinuxWrapShouldShow(s),changelog:s?s.wrapper_changelog||\`\`:\`\`,commit:s?s.candidate_wrapper_commit||\`\`:\`\`}}`,
     `function codexLinuxWrapManagerPath(){let e=process.env.CODEX_UPDATE_MANAGER_PATH;return typeof e===\`string\`&&e.trim().length>0?e:\`codex-update-manager\`}`,
     `function codexLinuxWrapSpawnCheck(){try{let c=${childProcessVar}.spawn(codexLinuxWrapManagerPath(),[\`check-wrapper\`],{stdio:\`ignore\`,detached:!0,env:process.env});c.on(\`error\`,()=>{});c.unref()}catch{}}`,
     `function codexLinuxWrapWriteMarker(){let p=codexLinuxWrapMarkerPath();if(!p)return{ok:!1,reason:\`no-marker-path\`};try{${fsVar}.mkdirSync(${pathVar}.dirname(p),{recursive:!0});${fsVar}.writeFileSync(p,new Date().toISOString());return{ok:!0,path:p}}catch(e){return{ok:!1,error:String(e?.message||e)}}}`,
-    // Spawn a detached watcher that survives app exit: wait for this app to
-    // quit, apply the wrapper update, then relaunch via the launcher. The marker
-    // is still written so a manual relaunch also applies the update if the
-    // watcher is killed. Relaunch command comes from CODEX_LINUX_LAUNCHER_CMD
-    // (exported by the launcher); apply-wrapper-update reads CODEX_LINUX_APP_DIR
-    // to pick the correct install-type path.
-    `function codexLinuxWrapApplyAfterQuit(){try{let mgr=codexLinuxWrapManagerPath();let launcher=process.env.CODEX_LINUX_LAUNCHER_CMD||\`\`;let pid=process.pid;let c=${childProcessVar}.spawn(\`/bin/sh\`,[\`-c\`,\`for i in $(seq 1 30);do kill -0 $1 2>/dev/null||break;sleep 1;done;"$2" apply-wrapper-update >/dev/null 2>&1||true;if [ -n "$3" ]&&[ -x "$3" ];then ("$3" >/dev/null 2>&1 &);fi\`,\`codex-linux-wrapper-apply\`,String(pid),mgr,launcher],{detached:!0,stdio:\`ignore\`,env:process.env});c.on(\`error\`,()=>{});c.unref?.()}catch{}}`,
-    `function codexLinuxWrapInstallNow(){let m=codexLinuxWrapWriteMarker();if(!m.ok)return m;codexLinuxWrapApplyAfterQuit();try{let a=require(\`electron\`).app;setTimeout(()=>a.exit(0),200);return{ok:!0}}catch(e){return{ok:!1,error:String(e?.message||e)}}}`,
+    `function codexLinuxWrapInstallNow(){let m=codexLinuxWrapWriteMarker();if(!m.ok)return m;try{let a=require(\`electron\`).app;setTimeout(()=>a.exit(0),120);return{ok:!0,path:m.path}}catch(e){return{ok:!1,error:String(e?.message||e)}}}`,
     `function codexLinuxWrapHandle(e={}){let action=e&&e.action;if(action===\`status\`)return codexLinuxWrapStatusPayload();if(action===\`check\`){codexLinuxWrapSpawnCheck();return{ok:!0}}if(action===\`install\`)return codexLinuxWrapInstallNow();return{ok:!1,reason:\`unknown-action\`}}`,
-    // Refresh wrapper state once at module load (primary instance only).
     `(()=>{if(process.env.CODEX_LINUX_MULTI_LAUNCH!==\`1\`)codexLinuxWrapSpawnCheck()})();`,
   ].join("");
 
@@ -82,12 +66,6 @@ function applyMainBundlePatch(source) {
   return withHandler.slice(0, helperInsertAt) + helper + withHandler.slice(helperInsertAt);
 }
 
-// ---------------------------------------------------------------------------
-// Webview runtime: a fixed-position "Update" button, positioned left of the
-// DMG update button so the two never overlap. Visible only when a wrapper
-// update is pending.
-// ---------------------------------------------------------------------------
-
 function wrapperRuntimeSource() {
   return [
     `;(()=>{`,
@@ -100,17 +78,14 @@ function wrapperRuntimeSource() {
     `window.addEventListener("message",onMessage);`,
     `function dispatch(payload){let bridge=window.electronBridge,ev=new CustomEvent("codex-message-from-view",{detail:payload});if(bridge?.sendMessageFromView){ev.__codexForwardedViaBridge=!0;bridge.sendMessageFromView(payload).catch(()=>{})}window.dispatchEvent(ev)}`,
     `function post(params,timeoutMs=4000){let requestId="codex-linux-wrapper-updater-"+ ++seq;let payload={type:"fetch",hostId:"local",requestId,method:"POST",url:"vscode://codex/"+METHOD,body:JSON.stringify(params??{})};return new Promise((resolve,reject)=>{pending.set(requestId,{resolve,reject});setTimeout(()=>{pending.delete(requestId);reject(Error("timeout"))},timeoutMs);dispatch(payload)})}`,
-    `function installStyle(){if(document.getElementById("codex-linux-wrapper-update-style"))return;let s=document.createElement("style");s.id="codex-linux-wrapper-update-style";s.textContent=".codex-linux-wrapper-update-btn{height:22px;padding:0 10px;margin:0 8px;display:none;align-items:center;font:500 12px/1 -apple-system,BlinkMacSystemFont,\\"Segoe UI\\",Roboto,sans-serif;color:#fff;background:#3a7d44;border:1px solid #4a9d54;border-radius:4px;cursor:pointer;pointer-events:auto;-webkit-app-region:no-drag;box-shadow:0 1px 2px rgba(0,0,0,0.18);transition:background-color 120ms ease;vertical-align:middle;line-height:1}.codex-linux-wrapper-update-btn[data-state=\\"available\\"],.codex-linux-wrapper-update-btn[data-state=\\"working\\"]{display:inline-flex}.codex-linux-wrapper-update-btn.codex-linux-wrapper-update-floating{position:fixed;top:6px;right:210px;z-index:2147483000}.codex-linux-wrapper-update-btn:hover{background:#4a9d54}.codex-linux-wrapper-update-btn:disabled{opacity:.7;cursor:default}";document.head.appendChild(s)}`,
+    `function installStyle(){if(document.getElementById("codex-linux-wrapper-update-style"))return;let s=document.createElement("style");s.id="codex-linux-wrapper-update-style";s.textContent=".codex-linux-wrapper-update-btn{height:22px;padding:0 10px;margin:0 8px;display:none;align-items:center;font:500 12px/1 -apple-system,BlinkMacSystemFont,\\"Segoe UI\\",Roboto,sans-serif;color:#fff;background:#3a7d44;border:1px solid #4a9d54;border-radius:4px;cursor:pointer;pointer-events:auto;-webkit-app-region:no-drag;box-shadow:0 1px 2px rgba(0,0,0,0.18);transition:background-color 120ms ease;vertical-align:middle;line-height:1}.codex-linux-wrapper-update-btn[data-state=\\"available\\"]{display:inline-flex}.codex-linux-wrapper-update-btn.codex-linux-wrapper-update-floating{position:fixed;top:6px;right:210px;z-index:2147483000}.codex-linux-wrapper-update-btn:hover{background:#4a9d54}.codex-linux-wrapper-update-btn:disabled{opacity:.7;cursor:default}";document.head.appendChild(s)}`,
     `function findHeaderTarget(){const candidates=["header","[role=\\"banner\\"]","nav[aria-label]"];for(const sel of candidates){const el=document.querySelector(sel);if(el&&el.getBoundingClientRect().top<120&&el.offsetHeight>0)return el}return null}`,
     `function attachButton(b){if(b.parentElement)return;let host=findHeaderTarget();if(host){b.classList.remove("codex-linux-wrapper-update-floating");host.appendChild(b)}else{b.classList.add("codex-linux-wrapper-update-floating");(document.body||document.documentElement).appendChild(b)}}`,
     `function ensureButton(){if(button&&document.contains(button))return button;installStyle();let b=document.createElement("button");b.type="button";b.className="codex-linux-wrapper-update-btn";b.setAttribute("aria-label","Update Codex Desktop Linux");b.title="A newer Codex Desktop Linux build is available";b.textContent="Update";b.addEventListener("click",onClick);button=b;attachButton(b);return b}`,
     `let observer=null;function watchForHeader(){if(observer)return;observer=new MutationObserver(()=>{if(!button)return;if(button.classList.contains("codex-linux-wrapper-update-floating")){let host=findHeaderTarget();if(host){button.classList.remove("codex-linux-wrapper-update-floating");host.appendChild(button)}}else if(!button.parentElement||!document.contains(button.parentElement)){attachButton(button)}});observer.observe(document.body||document.documentElement,{childList:!0,subtree:!0})}`,
-    `function setState(payload){let b=ensureButton();if(payload&&payload.working){b.dataset.state="working";b.textContent="Updating…";b.title="Rebuilding Codex Desktop Linux";b.disabled=true;return}if(payload&&payload.show){b.dataset.state="available";b.textContent="Update";b.disabled=false;let cl=(payload.changelog||"").trim();b.title=cl?("What's new:\\n"+cl.split("\\n").slice(0,12).join("\\n")):"A newer Codex Desktop Linux build is available";return}b.dataset.state="hidden"}`,
-    `async function onClick(){if(busy)return;busy=true;let b=ensureButton();b.disabled=true;try{let r=await post({action:"install"});if(r&&r.body&&r.body.ok===false){b.title=r.body.error||r.body.reason||"Update failed";setTimeout(()=>{b.title="A newer Codex Desktop Linux build is available"},2400)}}catch{}finally{busy=false;b.disabled=false}}`,
+    `function setState(payload){let b=ensureButton();if(payload&&payload.show){b.dataset.state="available";b.textContent="Update";b.disabled=false;let cl=(payload.changelog||"").trim();b.title=cl?("What's new:\\n"+cl.split("\\n").slice(0,12).join("\\n")):"A newer Codex Desktop Linux build is available";return}b.dataset.state="hidden"}`,
+    `async function onClick(){if(busy)return;busy=true;let b=ensureButton();b.disabled=true;b.textContent="Restarting...";try{let r=await post({action:"install"});if(r&&r.body&&r.body.ok===false){b.textContent="Update";b.title=r.body.error||r.body.reason||"Update failed";setTimeout(()=>{b.title="A newer Codex Desktop Linux build is available"},2400)}}catch{b.textContent="Update"}finally{busy=false;b.disabled=false}}`,
     `async function refresh(){try{let r=await post({action:"status"},2500);setState(r?.body||null)}catch{}}`,
-    // Trigger a detection check from the renderer on startup (the spawn reliably
-    // runs here), then poll status a few times early so the button appears within
-    // seconds of the git check completing instead of waiting a full 30s interval.
     `function start(){if(document.readyState==="loading"){document.addEventListener("DOMContentLoaded",start,{once:!0});return}ensureButton();watchForHeader();post({action:"check"}).catch(()=>{});refresh();[2000,5000,9000,15000,22000].forEach(t=>setTimeout(refresh,t));setInterval(()=>{post({action:"check"}).catch(()=>{});setTimeout(refresh,4000)},30000)}`,
     `start();`,
     `})();`,
@@ -124,21 +99,71 @@ function applyWebviewRuntimePatch(source) {
   return source + wrapperRuntimeSource();
 }
 
+function applyWrapperUpdateSettingsPatch(source) {
+  let next = source;
+  if (!next.includes("wrapperUpdates:")) {
+    const keyNeedle = `autoUpdateOnExit:"codex-linux-auto-update-on-exit"`;
+    if (!next.includes(keyNeedle)) {
+      throw new Error("could not find Linux update settings keys");
+    }
+    next = next.replace(
+      keyNeedle,
+      `${keyNeedle},wrapperUpdates:${JSON.stringify(WRAPPER_UPDATES_SETTING_KEY)}`,
+    );
+  }
+
+  if (!next.includes("Check for Codex Desktop Linux updates")) {
+    const toggleNeedle =
+      `children:$.jsx(LinuxToggle,{settingKey:KEYS.autoUpdateOnExit,label:"Install updates when you close Codex",description:"When on, a ready update waits for Codex to close and then installs. When off, updates wait until you click Update."})`;
+    if (!next.includes(toggleNeedle)) {
+      throw new Error("could not find Linux update toggle");
+    }
+    const wrapperToggle =
+      `children:[$.jsx(LinuxToggle,{settingKey:KEYS.autoUpdateOnExit,label:"Install updates when you close Codex",description:"When on, a ready update waits for Codex to close and then installs. When off, updates wait until you click Update."},"autoUpdateOnExit"),$.jsx(LinuxToggle,{settingKey:KEYS.wrapperUpdates,label:"Check for Codex Desktop Linux updates",description:"Check for Linux wrapper updates from codex-desktop-linux in addition to upstream Codex app updates.",defaultValue:!1},"wrapperUpdates")]`;
+    next = next.replace(toggleNeedle, wrapperToggle);
+  }
+
+  return next;
+}
+
+function patchWrapperUpdateSettingsAssets(extractedDir) {
+  try {
+    const filePath = path.join(extractedDir, "webview", "assets", KEYBINDS_ASSET);
+    if (!fs.existsSync(filePath)) {
+      return { matched: false, changed: 0, reason: `${KEYBINDS_ASSET} is not present` };
+    }
+    const current = fs.readFileSync(filePath, "utf8");
+    const patched = applyWrapperUpdateSettingsPatch(current);
+    if (patched === current) {
+      return { matched: true, changed: 0 };
+    }
+    fs.writeFileSync(filePath, patched, "utf8");
+    return { matched: true, changed: 1 };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`WARN: Wrapper update settings patch skipped: ${message}`);
+    return { matched: false, changed: 0, reason: message };
+  }
+}
+
 module.exports = {
   HANDLER_NAME,
   RUNTIME_VERSION,
+  WRAPPER_UPDATES_SETTING_KEY,
   applyMainBundlePatch,
   applyWebviewRuntimePatch,
+  applyWrapperUpdateSettingsPatch,
+  patchWrapperUpdateSettingsAssets,
   descriptors: [
     {
-      id: "codex-wrapper-updater-main-handler",
+      id: "main-handler",
       phase: "main-bundle",
       order: 20_920,
       ciPolicy: "optional",
       apply: applyMainBundlePatch,
     },
     {
-      id: "codex-wrapper-updater-webview-runtime",
+      id: "webview-runtime",
       phase: "webview-asset",
       order: 20_921,
       ciPolicy: "optional",
@@ -146,6 +171,19 @@ module.exports = {
       missingDescription: "webview index bundle",
       skipDescription: "codex wrapper updater webview runtime patch",
       apply: applyWebviewRuntimePatch,
+    },
+    {
+      id: "settings-toggle",
+      phase: "extracted-app",
+      order: 20_922,
+      ciPolicy: "optional",
+      apply: (extractedDir) => patchWrapperUpdateSettingsAssets(extractedDir),
+      status: (result, warnings) => {
+        if (result?.matched === false) {
+          return { status: "skipped-optional", reason: result.reason ?? warnings[0] ?? null };
+        }
+        return (result?.changed ?? 0) > 0 ? "applied" : "already-applied";
+      },
     },
   ],
 };

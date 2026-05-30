@@ -42,7 +42,12 @@ const REQUIRED_BUNDLE_FILES: [(&str, &str); 17] = [
     ("assets/codex.png", "assets/codex.png"),
     ("linux-features", "linux-features"),
 ];
-const OPTIONAL_BUNDLE_FILES: [(&str, &str); 3] = [
+const OPTIONAL_BUNDLE_FILES: [(&str, &str); 5] = [
+    ("CHANGELOG.md", "CHANGELOG.md"),
+    (
+        ".codex-linux/source-info.json",
+        ".codex-linux/source-info.json",
+    ),
     ("scripts/build-rpm.sh", "scripts/build-rpm.sh"),
     ("scripts/build-pacman.sh", "scripts/build-pacman.sh"),
     (
@@ -67,8 +72,7 @@ pub struct BuildArtifacts {
     pub package_path: PathBuf,
 }
 
-/// Rebuilds a Linux package from the downloaded upstream DMG, using the
-/// configured `builder_bundle_root` as the wrapper source.
+/// Rebuilds a Linux package from the downloaded upstream DMG.
 pub async fn build_update(
     config: &RuntimeConfig,
     state: &mut PersistedState,
@@ -87,11 +91,7 @@ pub async fn build_update(
     .await
 }
 
-/// Rebuilds a Linux package from the downloaded upstream DMG, copying the
-/// wrapper bundle from `bundle_source` (the configured builder bundle for DMG
-/// updates, or a freshly-fetched wrapper checkout for wrapper updates). The
-/// managed Node runtime is sourced from `config.builder_bundle_root` when
-/// present, falling back to `bundle_source`.
+/// Rebuilds a Linux package using an explicit wrapper/builder source tree.
 pub async fn build_update_from(
     bundle_source: &Path,
     config: &RuntimeConfig,
@@ -101,7 +101,12 @@ pub async fn build_update_from(
     dmg_path: &Path,
 ) -> Result<BuildArtifacts> {
     let workspace = BuilderWorkspace::prepare(&config.workspace_root, candidate_version)?;
-    let build_path = build_command_path(bundle_source);
+    let build_path = build_command_path(&config.builder_bundle_root);
+    let managed_node_source = if config.builder_bundle_root.join("node-runtime").exists() {
+        config.builder_bundle_root.join("node-runtime")
+    } else {
+        bundle_source.join("node-runtime")
+    };
 
     state.status = UpdateStatus::PreparingWorkspace;
     state.artifact_paths.workspace_dir = Some(workspace.workspace_dir.clone());
@@ -123,10 +128,7 @@ pub async fn build_update_from(
                 "CODEX_REBUILD_REPORT_JSON",
                 workspace.reports_dir.join("rebuild-report.json"),
             )
-            .env(
-                "CODEX_MANAGED_NODE_SOURCE",
-                config.builder_bundle_root.join("node-runtime"),
-            )
+            .env("CODEX_MANAGED_NODE_SOURCE", managed_node_source)
             .env("PATH", &build_path)
             .current_dir(&workspace.bundle_dir),
         &workspace.install_log,
@@ -575,8 +577,14 @@ touch "${DIST_DIR_OVERRIDE}/codex-desktop-${VER}-1-x86_64.pkg.tar.zst"
         fs::create_dir_all(bundle_root.join("launcher"))?;
         fs::create_dir_all(bundle_root.join("packaging/linux"))?;
         fs::create_dir_all(bundle_root.join("assets"))?;
+        fs::create_dir_all(bundle_root.join(".codex-linux"))?;
         write_fake_computer_use_bundle(&bundle_root)?;
         write_fake_linux_features_bundle(&bundle_root)?;
+        fs::write(bundle_root.join("CHANGELOG.md"), b"# Changelog\n")?;
+        fs::write(
+            bundle_root.join(".codex-linux/source-info.json"),
+            b"{\"commit\":\"0123456789012345678901234567890123456789\",\"version\":\"0.8.1\"}\n",
+        )?;
         fs::write(
             bundle_root.join("launcher/start.sh.template"),
             b"# fake launcher template\n",
@@ -730,6 +738,14 @@ fi
         assert!(artifacts
             .workspace_dir
             .join("builder/scripts/rebuild-candidate.sh")
+            .exists());
+        assert!(artifacts
+            .workspace_dir
+            .join("builder/CHANGELOG.md")
+            .exists());
+        assert!(artifacts
+            .workspace_dir
+            .join("builder/.codex-linux/source-info.json")
             .exists());
         assert!(artifacts
             .workspace_dir

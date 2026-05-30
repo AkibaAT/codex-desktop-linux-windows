@@ -1,8 +1,8 @@
 //! Applies a pending wrapper (repo) update for the current install type.
 //!
-//! Invoked by the launcher when it consumes the `wrapper-update-pending`
-//! marker. Detection (see [`crate::wrapper`]) only records that a newer wrapper
-//! build exists; this module performs the actual rebuild + install:
+//! Invoked by the optional `codex-wrapper-updater` Linux feature when it sees a
+//! pending apply marker. Detection (see [`crate::wrapper`]) only records that a
+//! newer wrapper build exists; this module performs the actual rebuild + install:
 //!
 //! - **User-local** installs reuse `~/.local/bin/codex-desktop-update`, which
 //!   pulls the managed checkout and re-runs `install.sh` in place as the user
@@ -10,7 +10,8 @@
 //! - **Packaged** installs fetch the wrapper source into a managed clone, build
 //!   a fresh native package from the cached DMG, and install it with `pkexec`.
 //!   When the build toolchain (cargo / node / a DMG extractor) is missing, this
-//!   degrades to a desktop notification instead of failing mid-rebuild.
+//!   sends a desktop notification and returns an error so the feature marker can
+//!   remain in place for a later retry.
 
 use anyhow::{Context, Result};
 use std::{
@@ -23,7 +24,7 @@ use crate::{
     builder,
     config::{RuntimeConfig, RuntimePaths},
     install, notify,
-    state::PersistedState,
+    state::{PersistedState, UpdateStatus},
     upstream, wrapper,
 };
 
@@ -60,26 +61,6 @@ fn detect_install_type(config: &RuntimeConfig) -> InstallType {
     }
 }
 
-fn set_wrapper_status(state: &mut PersistedState, paths: &RuntimePaths, status: &str) {
-    state.wrapper_status = Some(status.to_string());
-    let _ = state.save(&paths.state_file);
-}
-
-/// Removes the launcher handoff marker (`wrapper-update-pending`) so a manual
-/// relaunch does not re-apply an already-installed update. Best-effort.
-fn clear_pending_marker() {
-    let Some(home) = std::env::var_os("HOME") else {
-        return;
-    };
-    let state_root = std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(home).join(".local/state"));
-    let marker = state_root
-        .join("codex-desktop")
-        .join("wrapper-update-pending");
-    let _ = std::fs::remove_file(marker);
-}
-
 /// Applies a pending wrapper update. No-ops when wrapper tracking is disabled.
 pub async fn run_apply_wrapper_update(
     config: &RuntimeConfig,
@@ -91,23 +72,33 @@ pub async fn run_apply_wrapper_update(
         return Ok(());
     }
 
-    set_wrapper_status(state, paths, "applying");
+    if state.candidate_wrapper_commit.as_deref().is_none() {
+        println!("No wrapper update candidate is ready; nothing to apply.");
+        return Ok(());
+    }
 
+    let candidate_commit = state.candidate_wrapper_commit.clone();
     let result = match detect_install_type(config) {
-        InstallType::UserLocal => apply_user_local(config, paths).await,
-        InstallType::Packaged => apply_packaged(config, state, paths).await,
+        InstallType::UserLocal => {
+            apply_user_local(config, paths, candidate_commit.as_deref()).await
+        }
+        InstallType::Packaged => {
+            apply_packaged(config, state, paths, candidate_commit.as_deref()).await
+        }
     };
 
     match result {
         Ok(()) => {
-            state.wrapper_status = Some("installed".to_string());
-            state.candidate_wrapper_commit = None;
-            state.candidate_wrapper_date = None;
-            state.wrapper_changelog = None;
-            let _ = state.save(&paths.state_file);
-            // Clear the launcher handoff marker so a manual relaunch does not
-            // re-apply an already-installed update.
-            clear_pending_marker();
+            state.installed_version = install::installed_package_version();
+            state.candidate_version = None;
+            state.status = UpdateStatus::Installed;
+            state.error_message = None;
+            state.notified_events.clear();
+            state.artifact_paths.workspace_dir = None;
+            state.artifact_paths.package_path = None;
+            refresh_installed_wrapper_state(config, state);
+            state.clear_wrapper_update_candidate();
+            state.save(&paths.state_file)?;
             let _ = notify::send(
                 "Codex Desktop Linux updated",
                 "The newer Linux wrapper build has been installed.",
@@ -115,10 +106,19 @@ pub async fn run_apply_wrapper_update(
             Ok(())
         }
         Err(error) => {
-            set_wrapper_status(state, paths, "failed");
             warn!(?error, "wrapper update apply failed");
             Err(error)
         }
+    }
+}
+
+fn refresh_installed_wrapper_state(config: &RuntimeConfig, state: &mut PersistedState) {
+    if let Some(installed) = wrapper::installed_wrapper_from_metadata(
+        &config.app_executable_path,
+        &config.builder_bundle_root,
+    ) {
+        state.installed_wrapper_version = installed.version;
+        state.installed_wrapper_commit = Some(installed.commit);
     }
 }
 
@@ -126,7 +126,11 @@ pub async fn run_apply_wrapper_update(
 /// checkout pull + in-place `install.sh`) when present; otherwise falls back to
 /// fetching the wrapper source and running its `install.sh` directly against the
 /// running app dir. Runs as the user, no privilege escalation.
-async fn apply_user_local(config: &RuntimeConfig, paths: &RuntimePaths) -> Result<()> {
+async fn apply_user_local(
+    config: &RuntimeConfig,
+    paths: &RuntimePaths,
+    candidate_commit: Option<&str>,
+) -> Result<()> {
     if let Some(helper) = user_local_update_helper() {
         info!(helper = %helper.display(), "applying wrapper update via user-local helper");
         let status = Command::new(&helper)
@@ -146,7 +150,7 @@ async fn apply_user_local(config: &RuntimeConfig, paths: &RuntimePaths) -> Resul
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| app_dir.clone());
-    let wrapper_src = ensure_wrapper_source(config, paths)?;
+    let wrapper_src = ensure_wrapper_source(config, paths, candidate_commit)?;
     let install_sh = wrapper_src.join("install.sh");
     if !install_sh.is_file() {
         anyhow::bail!(
@@ -186,12 +190,12 @@ fn user_local_app_dir() -> Option<PathBuf> {
 }
 
 /// Packaged apply: fetch fresh wrapper source, rebuild a native package from the
-/// cached DMG, and install it with pkexec. Degrades to a notification when the
-/// build toolchain is unavailable.
+/// cached DMG, and install it with pkexec.
 async fn apply_packaged(
     config: &RuntimeConfig,
     state: &mut PersistedState,
     paths: &RuntimePaths,
+    candidate_commit: Option<&str>,
 ) -> Result<()> {
     if let Some(missing) = missing_build_dependency() {
         let body = format!(
@@ -199,10 +203,10 @@ async fn apply_packaged(
         );
         let _ = notify::send("Codex Desktop Linux update available", &body);
         println!("{body}");
-        return Ok(());
+        anyhow::bail!("missing build dependency for wrapper update: {missing}");
     }
 
-    let wrapper_src = ensure_wrapper_source(config, paths)?;
+    let wrapper_src = ensure_wrapper_source(config, paths, candidate_commit)?;
     let dmg_path = cached_or_downloaded_dmg(config, state, paths).await?;
 
     // The package version must remain monotonic (timestamp+dmghash), so derive
@@ -238,7 +242,11 @@ async fn apply_packaged(
 
 /// Clones or refreshes a managed wrapper checkout under the workspace cache and
 /// returns its path. Never touches the user's working tree.
-fn ensure_wrapper_source(config: &RuntimeConfig, paths: &RuntimePaths) -> Result<PathBuf> {
+fn ensure_wrapper_source(
+    config: &RuntimeConfig,
+    paths: &RuntimePaths,
+    candidate_commit: Option<&str>,
+) -> Result<PathBuf> {
     let remote = wrapper::resolve_remote(&config.wrapper_remote, &config.builder_bundle_root);
     let branch = if config.wrapper_branch.trim().is_empty() {
         "main"
@@ -264,7 +272,7 @@ fn ensure_wrapper_source(config: &RuntimeConfig, paths: &RuntimePaths) -> Result
             "reset",
             "--hard",
             "--quiet",
-            "FETCH_HEAD",
+            candidate_commit.unwrap_or("FETCH_HEAD"),
         ])?;
         run_git(&["-C", &dest.to_string_lossy(), "clean", "-fdx", "--quiet"])?;
     } else {
@@ -282,6 +290,16 @@ fn ensure_wrapper_source(config: &RuntimeConfig, paths: &RuntimePaths) -> Result
             &remote,
             &dest.to_string_lossy(),
         ])?;
+        if let Some(commit) = candidate_commit {
+            run_git(&[
+                "-C",
+                &dest.to_string_lossy(),
+                "reset",
+                "--hard",
+                "--quiet",
+                commit,
+            ])?;
+        }
     }
 
     Ok(dest)

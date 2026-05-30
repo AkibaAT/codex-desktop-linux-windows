@@ -7,25 +7,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- The `make setup-native` Linux feature picker can now present a GUI checklist
+  (zenity or kdialog) instead of the terminal-only numbered prompt, pre-checked
+  with the currently-enabled features. It falls back to the terminal picker when
+  no dialog tool or display is available (headless/SSH/CI) or when
+  `CODEX_BOOTSTRAP_NO_GUI=1` is set. The existing Python discovery/validation/
+  write path is reused unchanged.
+- An "Install updates when you close Codex" toggle in the Keybinds settings page
+  (new "Updates" section). When on (the default, matching prior behavior), a
+  ready update waits for Codex to close and then installs; when off, updates
+  wait until you explicitly click Update. The toggle persists to
+  `~/.config/<appId>/settings.json` as `codex-linux-auto-update-on-exit`, and
+  `codex-update-manager` rereads it during reconciliation as an overlay over
+  `config.toml` so the in-app preference wins without restarting the service.
 - `codex-update-manager` can now track newer *wrapper* releases (this repo's own
   Linux features and fixes) in addition to the upstream Codex DMG. Opt in with
   `enable_wrapper_updates = true` in `config.toml`; a new `check-wrapper`
   subcommand and the `status --json` output report the detected wrapper commit
-  and a changelog of what changed. Detection is git-based and read-only against
-  the builder checkout (it never mutates the working tree), prefers curated
-  `CHANGELOG.md` sections newer than the installed version, and falls back to
-  git commit subjects. Packaged frozen bundles without a git checkout degrade
-  gracefully (no wrapper tracking; updates arrive via a normal package upgrade).
-- A separate in-app "Update" button for wrapper updates, shipped as the opt-in
-  `codex-wrapper-updater` Linux feature (distinct from the upstream DMG Sparkle
-  button). It is invisible unless a wrapper update is pending, detects updates
-  with a git-only shallow fetch that works for both packaged and user-local
-  installs (no GitHub API, no `gh`/`curl`), and shows the changelog as a tooltip.
-  Clicking it applies the update after the app exits, then relaunches into the
-  freshly built version; the button hides again once the install is aligned with
-  upstream. Enable wrapper tracking from the "Check for Codex Desktop Linux
-  updates" toggle in the Keybinds → Updates settings section
-  (`codex-linux-wrapper-updates-enabled`).
+  and a changelog of what changed. Detection is git-based, requires the remote
+  candidate to descend from the installed checkout, clears stale candidates
+  when no update is currently valid, uses timeout-bound non-interactive git
+  commands, prefers curated `CHANGELOG.md` sections newer than the installed
+  version, and falls back to git commit subjects. Packaged frozen bundles
+  without a git checkout degrade gracefully (no wrapper tracking; updates arrive
+  via a normal package upgrade).
 - Launcher rendering mode `CODEX_LINUX_RENDERING_MODE=wayland-gpu`, which
   forces native Wayland with GPU compositing enabled and skips forced renderer
   accessibility by default for Wayland desktops where XWayland or software

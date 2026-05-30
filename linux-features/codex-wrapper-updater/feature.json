@@ -1,9 +1,20 @@
 {
   "id": "codex-wrapper-updater",
-  "name": "Wrapper update button",
-  "description": "Adds a separate top-right Update button that appears when a newer Codex Desktop Linux wrapper build (this project's own Linux features and fixes) is available. One click rebuilds and restarts. Distinct from the upstream Codex app updater. Requires the 'Check for Codex Desktop Linux updates' setting to be enabled.",
+  "name": "Wrapper updater",
+  "description": "Adds an opt-in Codex Desktop Linux wrapper update button. The feature owns the button, marker, retry, and apply hook; core only provides generic feature hooks.",
   "entrypoints": {
-    "patches": "./patch.js",
-    "stageHook": "./stage.sh"
+    "patchDescriptors": "./patch.js"
+  },
+  "runtimeHooks": {
+    "prelaunch": {
+      "source": "apply-pending.sh",
+      "name": "apply-pending.sh",
+      "mode": "0755"
+    },
+    "afterExit": {
+      "source": "apply-pending.sh",
+      "name": "apply-pending.sh",
+      "mode": "0755"
+    }
   }
 }
