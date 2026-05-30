@@ -4,7 +4,9 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const COMPUTER_USE_UI_ENV_VAR = "CODEX_LINUX_ENABLE_COMPUTER_USE_UI";
+const WINDOWS_COMPUTER_USE_UI_ENV_VAR = "CODEX_WINDOWS_ENABLE_COMPUTER_USE_UI";
 const COMPUTER_USE_UI_SETTINGS_KEY = "codex-linux-computer-use-ui-enabled";
+const WINDOWS_COMPUTER_USE_UI_SETTINGS_KEY = "codex-windows-computer-use-ui-enabled";
 
 // Computer Use has two postures: the bundled plugin gate is default-on Linux
 // platform glue; the visible UI gates remain opt-in because they bypass rollout
@@ -16,8 +18,19 @@ function isComputerUseUiEnabled(env = process.env) {
   return readComputerUseUiSettingsFlag(env);
 }
 
-function readComputerUseUiSettingsFlag(env) {
-  const settingsPath = computerUseUiSettingsPath(env);
+function isWindowsComputerUseUiEnabled(env = process.env) {
+  if (env[WINDOWS_COMPUTER_USE_UI_ENV_VAR] === "1") {
+    return true;
+  }
+  return readComputerUseUiSettingsFlag(env, {
+    key: WINDOWS_COMPUTER_USE_UI_SETTINGS_KEY,
+    path: windowsComputerUseUiSettingsPath(env),
+  });
+}
+
+function readComputerUseUiSettingsFlag(env, options = {}) {
+  const settingsPath = options.path ?? computerUseUiSettingsPath(env);
+  const key = options.key ?? COMPUTER_USE_UI_SETTINGS_KEY;
   if (settingsPath == null) {
     return false;
   }
@@ -30,10 +43,14 @@ function readComputerUseUiSettingsFlag(env) {
     if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
       return false;
     }
-    return parsed[COMPUTER_USE_UI_SETTINGS_KEY] === true;
+    return parsed[key] === true;
   } catch {
     return false;
   }
+}
+
+function explicitSettingsPath(value) {
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
 
 function computerUseUiSettingsPath(env) {
@@ -51,8 +68,32 @@ function computerUseUiSettingsPath(env) {
   return path.join(configHome, appId, "settings.json");
 }
 
+function windowsComputerUseUiSettingsPath(env) {
+  const explicit = explicitSettingsPath(env.CODEX_WINDOWS_SETTINGS_FILE);
+  if (explicit != null) {
+    return explicit;
+  }
+  const xdgConfig = env.XDG_CONFIG_HOME;
+  const home = env.HOME;
+  const configHome = (xdgConfig && xdgConfig.length > 0)
+    ? xdgConfig
+    : home
+      ? path.join(home, ".config")
+      : null;
+  if (configHome == null) {
+    return null;
+  }
+  const appId = windowsComputerUseUiSettingsAppId(env);
+  return path.join(configHome, appId, "settings.json");
+}
+
 function computerUseUiSettingsAppId(env) {
   const appId = env.CODEX_APP_ID || env.CODEX_LINUX_APP_ID || "codex-desktop";
+  return /^[A-Za-z0-9._-]+$/.test(appId) ? appId : "codex-desktop";
+}
+
+function windowsComputerUseUiSettingsAppId(env) {
+  const appId = env.CODEX_WINDOWS_APP_ID || env.CODEX_APP_ID || "codex-desktop";
   return /^[A-Za-z0-9._-]+$/.test(appId) ? appId : "codex-desktop";
 }
 
@@ -158,6 +199,59 @@ function applyLinuxComputerUsePluginGatePatch(currentSource) {
   return currentSource;
 }
 
+function applyWindowsComputerUsePluginGatePatch(currentSource) {
+  if (!hasComputerUseLiteral(currentSource)) {
+    console.warn(
+      "WARN: Could not find Computer Use plugin gate literal — skipping Windows Computer Use plugin gate patch",
+    );
+    return currentSource;
+  }
+
+  const computerUseNameVar = currentSource.match(/([A-Za-z_$][\w$]*)=(?:`computer-use`|"computer-use"|'computer-use')/)?.[1] ?? null;
+  const nameExpressionPattern = String.raw`(?:[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?|` +
+    String.raw`\`computer-use\`|"computer-use"|'computer-use')`;
+  const gateRegex =
+    new RegExp(String.raw`\{(installWhenMissing:!0,)?name:(${nameExpressionPattern}),(isEnabled|isAvailable):\(\{([^}]*)\}\)=>([^{}]*?===\`win32\`[^{}]*?\.computerUse)(,migrate:([A-Za-z_$][\w$]*))?\}`, "g");
+  let patchedGateCount = 0;
+  let sawEnabledGate = false;
+  const patchedSource = currentSource.replace(
+    gateRegex,
+    (gateSource, installWhenMissing, nameExpr, availabilityProp, paramsText, expression, migrateSegment = "", migrateVar) => {
+      if (!isComputerUseNameExpr(nameExpr, computerUseNameVar)) {
+        return gateSource;
+      }
+
+      const aliases = parseDestructuredParamAliases(paramsText);
+      const featuresVar = aliases.features;
+      const platformVar = aliases.platform;
+      if (featuresVar == null || platformVar == null) {
+        return gateSource;
+      }
+
+      const windowsExpression = `${platformVar}===\`win32\`&&${featuresVar}.computerUse`;
+      if (installWhenMissing != null && expression === windowsExpression) {
+        sawEnabledGate = true;
+        return gateSource;
+      }
+      patchedGateCount += 1;
+      const migrate = migrateVar == null ? "" : `,migrate:${migrateVar}`;
+      return `{installWhenMissing:!0,name:${nameExpr},${availabilityProp}:({features:${featuresVar},platform:${platformVar}})=>${windowsExpression}${migrate}}`;
+    },
+  );
+
+  if (patchedGateCount > 0 || sawEnabledGate) {
+    return patchedSource;
+  }
+
+  if (hasComputerUseLiteral(currentSource) && currentSource.includes("computerUse") && currentSource.includes("win32")) {
+    console.warn(
+      "WARN: Could not find Windows Computer Use plugin gate — skipping Windows Computer Use plugin gate patch",
+    );
+  }
+
+  return currentSource;
+}
+
 function applyLinuxComputerUseFeaturePatch(currentSource) {
   const patchedFeaturePattern =
     /function [A-Za-z_$][\w$]*\([A-Za-z_$][\w$]*,\{env:[A-Za-z_$][\w$]*=process\.env,platform:[A-Za-z_$][\w$]*=process\.platform\}=\{\}\)\{return [A-Za-z_$][\w$]*===`linux`\?\{\.\.\.[A-Za-z_$][\w$]*,computerUse:!0,computerUseNodeRepl:!0\}:/;
@@ -195,6 +289,193 @@ function applyLinuxComputerUseFeaturePatch(currentSource) {
   if (currentSource.includes("CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE")) {
     console.warn(
       "WARN: Could not find Computer Use desktop feature gate — skipping Linux Computer Use feature patch",
+    );
+  }
+
+  return currentSource;
+}
+
+function applyWindowsComputerUseFeaturePatch(currentSource) {
+  const patchedFeaturePattern =
+    /function [A-Za-z_$][\w$]*\([A-Za-z_$][\w$]*,\{env:[A-Za-z_$][\w$]*=process\.env,platform:([A-Za-z_$][\w$]*)=process\.platform\}=\{\}\)\{return \1===`win32`\?\{\.\.\.[A-Za-z_$][\w$]*,computerUse:!0,computerUseNodeRepl:!0\}:/;
+  const currentPatchedFeaturePattern =
+    /let [A-Za-z_$][\w$]*=[A-Za-z_$][\w$]*===`win32`\?\{\.\.\.[A-Za-z_$][\w$]*,computerUse:!0,computerUseNodeRepl:!0\}:[A-Za-z_$][\w$]*,/;
+  const windowsOnlyFeaturePattern =
+    /function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*),\{env:([A-Za-z_$][\w$]*)=process\.env,platform:([A-Za-z_$][\w$]*)=process\.platform\}=\{\}\)\{return \4!==`win32`\|\|\3\.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE!==`1`\?\2:\{\.\.\.\2,computerUse:!0,computerUseNodeRepl:!0\}\}/g;
+  const currentWindowsOnlyFeaturePattern =
+    /let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)===`win32`&&([A-Za-z_$][\w$]*)\.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE===`1`\?\{\.\.\.([A-Za-z_$][\w$]*),computerUse:!0,computerUseNodeRepl:!0\}:\4,/g;
+
+  let changed = false;
+  let patchedSource = currentSource.replace(
+    windowsOnlyFeaturePattern,
+    (_, fnName, featuresVar, envVar, platformVar) => {
+      changed = true;
+      return `function ${fnName}(${featuresVar},{env:${envVar}=process.env,platform:${platformVar}=process.platform}={}){return ${platformVar}===\`win32\`?{...${featuresVar},computerUse:!0,computerUseNodeRepl:!0}:${featuresVar}}`;
+    },
+  );
+  patchedSource = patchedSource.replace(
+    currentWindowsOnlyFeaturePattern,
+    (_, gateVar, platformVar, envVar, featuresVar) => {
+      changed = true;
+      return `let ${gateVar}=${platformVar}===\`win32\`?{...${featuresVar},computerUse:!0,computerUseNodeRepl:!0}:${featuresVar},`;
+    },
+  );
+
+  if (changed) {
+    return patchedSource;
+  }
+
+  if (patchedFeaturePattern.test(currentSource) || currentPatchedFeaturePattern.test(currentSource)) {
+    return currentSource;
+  }
+
+  if (currentSource.includes("CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE")) {
+    console.warn(
+      "WARN: Could not find Windows Computer Use desktop feature gate — skipping Windows Computer Use feature patch",
+    );
+  }
+
+  return currentSource;
+}
+
+function applyWindowsComputerUseRendererAvailabilityPatch(currentSource) {
+  let patchedSource = currentSource;
+  let availabilityChanged = false;
+  let availabilityGateFound = false;
+
+  const computerUseFeatureNeedle = "featureName:`computer_use`";
+  const hasComputerUseAvailabilityGate = () =>
+    currentSource.includes(computerUseFeatureNeedle) &&
+    (currentSource.includes("isComputerUseAvailable") || currentSource.includes("1506311413"));
+  const availabilityAlreadyPatched = () =>
+    /featureName:`computer_use`[\s\S]{0,1200}?let ([A-Za-z_$][\w$]*)=[A-Za-z_$][\w$]*&&[A-Za-z_$][\w$]*&&\([A-Za-z_$][\w$]*===`windows`\|\|[A-Za-z_$][\w$]*&&\([A-Za-z_$][\w$]*\|\|[A-Za-z_$][\w$]*\)\),[A-Za-z_$][\w$]*=\1&&![A-Za-z_$][\w$]*&&\([A-Za-z_$][\w$]*===`windows`\|\|[A-Za-z_$][\w$]*\.enabled\)&&![A-Za-z_$][\w$]*\.isLoading/.test(patchedSource) ||
+    /featureName:`computer_use`[\s\S]{0,1800}?isComputerUseFeatureEnabled:([A-Za-z_$][\w$]*)===`windows`\|\|[A-Za-z_$][\w$]*\.enabled,isComputerUseFeatureLoading:\1!==`windows`&&[A-Za-z_$][\w$]*\.isLoading,isComputerUseGateEnabled:\1===`windows`\|\|[A-Za-z_$][\w$]*,isHostCompatiblePlatform:\1===`windows`\|\|[A-Za-z_$][\w$]*\(\1\)(?:,isHostLocal:[A-Za-z_$][\w$]*)?,isPlatformLoading:/.test(patchedSource);
+
+  const findPlatformVarForAvailabilityGate = (offset, platformLoadingVar) => {
+    const lookback = patchedSource.slice(Math.max(0, offset - 900), offset);
+    const loadingFirst = new RegExp(String.raw`\{isLoading:${platformLoadingVar},platform:([A-Za-z_$][\w$]*)\}=`);
+    const platformFirst = new RegExp(String.raw`\{platform:([A-Za-z_$][\w$]*),isLoading:${platformLoadingVar}\}=`);
+    return lookback.match(loadingFirst)?.[1] ?? lookback.match(platformFirst)?.[1] ?? null;
+  };
+
+  const availabilityNeedle =
+    "let m=a&&i&&s===`electron`&&u&&(c||p),h=m&&!c&&f.enabled&&!f.isLoading,g=m&&f.isLoading,_=m&&(c||f.isLoading),v;";
+  const availabilityPatch =
+    "let m=a&&i&&s===`electron`&&(l===`windows`||u&&(c||p)),h=m&&!c&&(l===`windows`||f.enabled)&&!f.isLoading,g=m&&l!==`windows`&&f.isLoading,_=m&&(c||l!==`windows`&&f.isLoading),v;";
+  if (patchedSource.includes(availabilityNeedle)) {
+    patchedSource = patchedSource.split(availabilityNeedle).join(availabilityPatch);
+    availabilityChanged = true;
+  }
+
+  const currentAvailabilityNeedle =
+    "let _=a&&i&&l&&(o||m),v=_&&!o&&p.enabled&&!p.isLoading,y=_&&p.isLoading,b=_&&(o||p.isLoading),x;";
+  const currentAvailabilityPatch =
+    "let _=a&&i&&(c===`windows`||l&&(o||m)),v=_&&!o&&(c===`windows`||p.enabled)&&!p.isLoading,y=_&&c!==`windows`&&p.isLoading,b=_&&(o||c!==`windows`&&p.isLoading),x;";
+  if (patchedSource.includes(currentAvailabilityNeedle)) {
+    patchedSource = patchedSource.split(currentAvailabilityNeedle).join(currentAvailabilityPatch);
+    availabilityChanged = true;
+  }
+
+  const currentHookAvailabilityPattern =
+    /let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)&&([A-Za-z_$][\w$]*)&&([A-Za-z_$][\w$]*)&&\(([A-Za-z_$][\w$]*)\|\|([A-Za-z_$][\w$]*)\),([A-Za-z_$][\w$]*)=\1&&!\5&&([A-Za-z_$][\w$]*)\.enabled&&!\8\.isLoading,([A-Za-z_$][\w$]*)=\1&&\8\.isLoading,([A-Za-z_$][\w$]*)=\1&&\(\5\|\|\8\.isLoading\),([A-Za-z_$][\w$]*);/g;
+  patchedSource = patchedSource.replace(
+    currentHookAvailabilityPattern,
+    (
+      match,
+      availabilityVar,
+      enabledVar,
+      isHostLocalVar,
+      rolloutVar,
+      platformLoadingVar,
+      supportedPlatformVar,
+      availableVar,
+      featureQueryVar,
+      fetchingVar,
+      loadingVar,
+      resultVar,
+      offset,
+    ) => {
+      const contextStart = Math.max(0, offset - 900);
+      const context = patchedSource.slice(contextStart, offset + match.length);
+      if (!context.includes(computerUseFeatureNeedle)) {
+        return match;
+      }
+      availabilityGateFound = true;
+      const platformVar = findPlatformVarForAvailabilityGate(offset, platformLoadingVar);
+      if (platformVar == null) {
+        return match;
+      }
+      availabilityChanged = true;
+      return `let ${availabilityVar}=${enabledVar}&&${isHostLocalVar}&&(${platformVar}===\`windows\`||${rolloutVar}&&(${platformLoadingVar}||${supportedPlatformVar})),${availableVar}=${availabilityVar}&&!${platformLoadingVar}&&(${platformVar}===\`windows\`||${featureQueryVar}.enabled)&&!${featureQueryVar}.isLoading,${fetchingVar}=${availabilityVar}&&${platformVar}!==\`windows\`&&${featureQueryVar}.isLoading,${loadingVar}=${availabilityVar}&&(${platformLoadingVar}||${platformVar}!==\`windows\`&&${featureQueryVar}.isLoading),${resultVar};`;
+    },
+  );
+
+  const currentObjectAvailabilityPattern =
+    /([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\{enabled:([A-Za-z_$][\w$]*),isComputerUseFeatureEnabled:([A-Za-z_$][\w$]*)\.enabled,isComputerUseFeatureLoading:\4\.isLoading,isComputerUseGateEnabled:([A-Za-z_$][\w$]*),isHostCompatiblePlatform:([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)(?:,isHostLocal:([A-Za-z_$][\w$]*))?,isPlatformLoading:([A-Za-z_$][\w$]*),windowType:`electron`\}\)/g;
+  patchedSource = patchedSource.replace(
+    currentObjectAvailabilityPattern,
+    (
+      match,
+      resultVar,
+      helperVar,
+      enabledVar,
+      featureQueryVar,
+      rolloutVar,
+      platformPredicateVar,
+      platformVar,
+      isHostLocalVar,
+      platformLoadingVar,
+      offset,
+    ) => {
+      const contextStart = Math.max(0, offset - 900);
+      const context = patchedSource.slice(contextStart, offset + match.length);
+      if (!context.includes(computerUseFeatureNeedle)) {
+        return match;
+      }
+      availabilityGateFound = true;
+      availabilityChanged = true;
+      const hostLocalSegment = isHostLocalVar == null ? "" : `,isHostLocal:${isHostLocalVar}`;
+      return `${resultVar}=${helperVar}({enabled:${enabledVar},isComputerUseFeatureEnabled:${platformVar}===\`windows\`||${featureQueryVar}.enabled,isComputerUseFeatureLoading:${platformVar}!==\`windows\`&&${featureQueryVar}.isLoading,isComputerUseGateEnabled:${platformVar}===\`windows\`||${rolloutVar},isHostCompatiblePlatform:${platformVar}===\`windows\`||${platformPredicateVar}(${platformVar})${hostLocalSegment},isPlatformLoading:${platformLoadingVar},windowType:\`electron\`})`;
+    },
+  );
+
+  if (availabilityChanged || availabilityAlreadyPatched()) {
+    return patchedSource;
+  }
+
+  if (hasComputerUseAvailabilityGate() || availabilityGateFound) {
+    console.warn(
+      "WARN: Could not find Computer Use renderer availability gate — skipping Windows Computer Use UI availability patch",
+    );
+  }
+
+  return currentSource;
+}
+
+function applyWindowsComputerUseInstallFlowPatch(currentSource) {
+  const currentAvailabilityPattern =
+    /([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\{featureName:`computer_use`,hostId:([^}]+)\}\),([^;]{0,300}?)([A-Za-z_$][\w$]*)=!\1\.isLoading&&\1\.enabled,/g;
+
+  let changed = false;
+  const patchedSource = currentSource.replace(
+    currentAvailabilityPattern,
+    (_, queryVar, queryFn, hostExpr, between, availableVar) => {
+      changed = true;
+      return `${queryVar}=${queryFn}({featureName:\`computer_use\`,hostId:${hostExpr}}),${between}${availableVar}=!${queryVar}.isLoading&&${queryVar}.enabled||navigator.userAgent.includes(\`Windows\`),`;
+    },
+  );
+
+  if (changed) {
+    return patchedSource;
+  }
+
+  if (/=[^=]+\.isLoading&&[^=]+\.enabled\|\|navigator\.userAgent\.includes\(`Windows`\),/.test(currentSource)) {
+    return currentSource;
+  }
+
+  if (currentSource.includes("featureName:`computer_use`")) {
+    console.warn(
+      "WARN: Could not find Computer Use install flow gate — skipping Windows Computer Use install flow patch",
     );
   }
 
@@ -384,9 +665,16 @@ function applyLinuxComputerUseInstallFlowPatch(currentSource) {
 module.exports = {
   COMPUTER_USE_UI_ENV_VAR,
   COMPUTER_USE_UI_SETTINGS_KEY,
+  WINDOWS_COMPUTER_USE_UI_ENV_VAR,
+  WINDOWS_COMPUTER_USE_UI_SETTINGS_KEY,
   applyLinuxComputerUseFeaturePatch,
   applyLinuxComputerUseInstallFlowPatch,
   applyLinuxComputerUsePluginGatePatch,
   applyLinuxComputerUseRendererAvailabilityPatch,
+  applyWindowsComputerUseFeaturePatch,
+  applyWindowsComputerUseInstallFlowPatch,
+  applyWindowsComputerUsePluginGatePatch,
+  applyWindowsComputerUseRendererAvailabilityPatch,
   isComputerUseUiEnabled,
+  isWindowsComputerUseUiEnabled,
 };

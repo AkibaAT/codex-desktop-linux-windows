@@ -246,11 +246,16 @@ run_core_job() {
 
     node --check scripts/patch-linux-window-ui.js
     node --check scripts/patch-linux-window-ui.test.js
+    node --check scripts/patch-windows-connections.js
+    node --check scripts/patch-windows-connections.test.js
+    node --check scripts/fetch-windows-msix.js
+    node --check scripts/build-windows-zip.js
     for file in scripts/patches/*.js; do
         node --check "$file"
     done
     node --check scripts/ci/validate-patch-report.js
     node --test scripts/patch-linux-window-ui.test.js
+    node --test scripts/patch-windows-connections.test.js
 
     bash tests/scripts_smoke.sh
 

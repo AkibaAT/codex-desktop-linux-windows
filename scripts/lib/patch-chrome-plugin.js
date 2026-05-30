@@ -270,10 +270,11 @@ patchFileFirstMatch(path.join(scriptsDir, "installManifest.mjs"), {
     'linux:[".config/google-chrome/NativeMessagingHosts",".config/BraveSoftware/Brave-Browser/NativeMessagingHosts",".config/chromium/NativeMessagingHosts"]',
 });
 
-patchFile(path.join(scriptsDir, "check-native-host-manifest.js"), [
-  {
-    label: "Linux native host manifest locations",
-    oldText: `  if (process.platform === "win32") {
+patchFileFirstMatch(path.join(scriptsDir, "check-native-host-manifest.js"), {
+  label: "Linux browser native host manifest fallback",
+  oldTexts: [
+    {
+      oldText: `  if (process.platform === "win32") {
     const registryKey = \`\${WINDOWS_NATIVE_HOST_REGISTRY_KEY_PREFIX}\\\\\${expectedHostName}\`;
     const registryManifestPath = readWindowsRegistryDefaultValue(registryKey);
 
@@ -288,7 +289,7 @@ patchFile(path.join(scriptsDir, "check-native-host-manifest.js"), [
   throw new Error(
     \`Unsupported platform for native host manifest check: \${process.platform}. This script supports macOS and Windows.\`,
   );`,
-    newText: `  if (process.platform === "win32") {
+      newText: `  if (process.platform === "win32") {
     const registryKey = \`\${WINDOWS_NATIVE_HOST_REGISTRY_KEY_PREFIX}\\\\\${expectedHostName}\`;
     const registryManifestPath = readWindowsRegistryDefaultValue(registryKey);
 
@@ -305,11 +306,8 @@ ${linuxNativeHostManifestFallback}
   throw new Error(
     \`Unsupported platform for native host manifest check: \${process.platform}. This script supports macOS, Linux, and Windows.\`,
   );`,
-    alreadyText: '"chromium",\n        "NativeMessagingHosts"',
-  },
-  {
-    label: "Linux browser native host manifest fallback",
-    oldText: `  if (process.platform === "linux") {
+    },
+    `  if (process.platform === "linux") {
     return {
       manifestPath: path.join(
         os.homedir(),
@@ -323,10 +321,10 @@ ${linuxNativeHostManifestFallback}
       registryKeyExists: null,
     };
   }`,
-    newText: linuxNativeHostManifestFallback,
-    alreadyText: '"chromium",\n        "NativeMessagingHosts"',
-  },
-]);
+  ],
+  newText: linuxNativeHostManifestFallback,
+  alreadyText: '"chromium",\n        "NativeMessagingHosts"',
+});
 
 patchFileFirstMatch(path.join(scriptsDir, "browser-client.mjs"), {
   label: "Linux Chrome profile roots",

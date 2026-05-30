@@ -9,6 +9,9 @@ The project builds native `.deb`, `.rpm`, and `.pkg.tar.zst` packages, supports
 local AppImage self-builds and Nix, and can install a local update manager that
 rebuilds future Linux packages from newer upstream DMGs.
 
+It also includes a Windows patcher path that repackages the official Windows
+MSIX as a patched ZIP for testing connection fixes.
+
 Before opening a pull request, read [CONTRIBUTING.md](CONTRIBUTING.md). For
 implementation details, see [AGENTS.md](AGENTS.md).
 
@@ -22,6 +25,7 @@ implementation details, see [AGENTS.md](AGENTS.md).
 | Arch, Manjaro, EndeavourOS | `make bootstrap-native` | Builds and installs a pacman package |
 | NixOS / Nix | `nix run github:ilysenko/codex-desktop-linux` | See [Nix docs](docs/nix.md) |
 | Atomic desktops / other distros | `make build-app && make appimage` | Local self-build; no bundled updater |
+| Windows 10/11 | standalone test ZIP | `.zip` | `make windows-zip` patches the official Windows MSIX payload; no auto-updater |
 
 Native install:
 
@@ -87,6 +91,7 @@ workarounds.
 | Auto-update manager | Native packages | Included unless `PACKAGE_WITH_UPDATER=0` | [Updater](docs/updater.md) |
 | AppImage self-build | Manual | `make build-app && make appimage` | [Build and packaging](docs/build-and-packaging.md#appimage-local-self-build) |
 | Nix flake | Manual | `nix run github:ilysenko/codex-desktop-linux` | [Nix](docs/nix.md) |
+| Windows ZIP patcher | Manual | `make windows-zip` | [Windows patcher](docs/windows-patcher.md) |
 | GUI install prompts | If installed | Uses `kdialog` / `zenity`, then terminal fallback | [Native setup](docs/native-setup.md) |
 | Linux file manager integration | Always | Built into core Linux patches | [Architecture](docs/architecture.md) |
 | Chrome plugin native host | Always | Installed with bundled plugins | [Architecture](docs/architecture.md) |
@@ -200,11 +205,16 @@ make deb
 make rpm
 make pacman
 make appimage
+make windows-zip
 ```
 
 The package scripts only repackage the already-generated `codex-app/`. They do
 not download or extract the DMG themselves. See
 [Build and packaging](docs/build-and-packaging.md).
+
+For repeatable Windows ZIP builds, pin the MSIX with
+`WINDOWS_MSIX=/path/to/OpenAI.Codex_...msix make windows-zip`. See
+[Windows patcher](docs/windows-patcher.md).
 
 ## Troubleshooting
 
@@ -232,6 +242,7 @@ Full list: [Troubleshooting](docs/troubleshooting.md).
 - [GitHub CLI auth in app-launched shells](docs/github-cli-auth.md)
 - [Linux Features architecture](docs/linux-features-architecture.md)
 - [Webview server evaluation](docs/webview-server-evaluation.md)
+- [Windows patcher](docs/windows-patcher.md)
 
 ## Disclaimer
 
