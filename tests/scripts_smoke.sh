@@ -3166,7 +3166,7 @@ PY
     assert_contains "$REPO_DIR/launcher/start.sh.template" ".tmp/bundled-marketplaces/openai-bundled"
     assert_contains "$REPO_DIR/launcher/start.sh.template" ".agents/plugins/marketplace.json"
     assert_contains "$REPO_DIR/scripts/lib/bundled-plugins.sh" "stage_chrome_plugin_from_upstream"
-    assert_contains "$REPO_DIR/scripts/lib/patch-chrome-plugin.js" "Linux native host manifest location"
+    assert_contains "$REPO_DIR/scripts/lib/patch-chrome-plugin.js" "Linux browser native host manifest locations"
     assert_contains "$REPO_DIR/computer-use-linux/src/bin/codex-chrome-extension-host.rs" "CODEX_BROWSER_USE_SOCKET_DIR"
     assert_contains "$REPO_DIR/flake.nix" "Browser Use bundled marketplace metadata"
     assert_contains "$REPO_DIR/flake.nix" ".tmp/bundled-marketplaces/openai-bundled"
@@ -3774,6 +3774,34 @@ JS
     assert_contains "$browser_client" 'async(e,t,r=$c)'
     assert_contains "$browser_client" "instanceId:await bk(o.id,e,r)"
     assert_contains "$browser_client" "codexLinuxRankBrowserBackends"
+}
+
+test_chrome_browser_client_current_profile_shape() {
+    info "Checking Chrome browser-client current profile shape"
+    local workspace="$TMP_DIR/chrome-browser-client-current-profile-shape"
+    local chrome_dir="$workspace/chrome"
+    local browser_client="$chrome_dir/scripts/browser-client.mjs"
+    local output_log="$workspace/output.log"
+
+    mkdir -p "$chrome_dir/scripts"
+
+    cat > "$browser_client" <<'JS'
+import{resolve as Xq}from"path";import{homedir as Qq,platform as e$}from"os";var ld=Xq(Qq(),e$()==="win32"?"AppData\\Local\\Google\\Chrome\\User Data":"Library/Application Support/Google/Chrome");import{ClassicLevel as t$}from"./node_modules/classic-level.mjs";import{resolve as Zh}from"path";import{tmpdir as r$}from"os";import{cp as n$,mkdtemp as o$,rm as YA}from"fs/promises";import{existsSync as i$}from"fs";var ZA=async(e,t)=>{let r=Zh(ld,e,"Local Extension Settings",t);if(!i$(r))return null;let n=await o$(Zh(s$(),"codex"));await n$(r,n,{recursive:!0}),await YA(Zh(n,"LOCK"));let o=new t$(n,{createIfMissing:!1,keyEncoding:"utf8",valueEncoding:"utf8"});try{await o.open();let i=await o.get("extensionInstanceId");if(!i)return null;let s=JSON.parse(i);return typeof s!="string"?null:s}finally{await o.close(),await YA(n,{force:!0,recursive:!0})}},s$=()=>"nodeRepl"in globalThis&&globalThis.nodeRepl?globalThis.nodeRepl.tmpDir:r$();var XA=async e=>{if(e.type!=="extension"||!e.metadata?.extensionInstanceId||!e.metadata.extensionId)return e;let t=await l$(e.metadata.extensionId,e.metadata.extensionInstanceId);return t?{...e,metadata:{...e.metadata,profileName:t.name,profileIsLastUsed:t.isLastUsed.toString(),profileOrdering:t.orderingIndex.toString()}}:e},l$=async(e,t)=>(await c$(e)).find(o=>o.instanceId===t)||null,c$=async e=>{let t=await d$();return await Promise.all(t.map(async r=>({...r,instanceId:await ZA(r.id,e).catch(n=>(ue(n),null))})))},d$=async()=>{let e=u$(ld,"Local State"),t=JSON.parse(await a$(e,"utf8"));return t.profile.profiles_order.map((r,n)=>{let o=t.profile.info_cache[r];return o?{id:r,name:o.name,isLastUsed:t.profile.last_used===r,orderingIndex:n,avatarUrl:o.avatar_icon}:null}).filter(r=>!!r)};var f$=async(e,{codexSessionId:t})=>{let r=Vu(Vy),n=e.filter(i=>i.info.type==="iab"),o=m$(n,t,r);return await Promise.all(n.filter(i=>!o.includes(i)).map(async({api:i})=>i.close())),[...e.filter(i=>i.info.type!=="iab"),...o]},m$=(e,t,r)=>t==null?[]:e.filter(n=>n.info.metadata?.codexSessionId===t&&(r==null||n.info.metadata.codexAppBuildFlavor===r));
+JS
+    node "$REPO_DIR/scripts/lib/patch-chrome-plugin.js" "$chrome_dir" >"$output_log" 2>&1
+
+    assert_contains "$browser_client" "codexLinuxChromeUserDataDirectories"
+    assert_contains "$browser_client" '"BraveSoftware","Brave-Browser"'
+    assert_contains "$browser_client" '".config","chromium"'
+    assert_contains "$browser_client" "var ZA=async(e,t,r=ld)"
+    assert_contains "$browser_client" "instanceId:await ZA(o.id,e,r)"
+    assert_contains "$browser_client" "codexLinuxRankBrowserBackends"
+    assert_contains "$browser_client" "getUserTabs()"
+    assert_not_contains "$output_log" "missing patch target for Linux Chrome profile roots"
+    assert_not_contains "$output_log" "missing patch target for Linux Chrome profile metadata lookup"
+    assert_not_contains "$output_log" "missing patch target for Linux Chrome profile instance matching"
+    assert_not_contains "$output_log" "missing patch target for Linux Chrome active profile backend ordering"
+    node --check "$browser_client" >/dev/null 2>&1 || fail "Patched current Chrome browser-client fixture is not parseable"
 }
 
 test_chrome_marketplace_fallback_synthesis() {
@@ -5870,6 +5898,7 @@ main() {
     test_browser_use_node_repl_ldd_output_compatibility
     test_chrome_plugin_staging
     test_chrome_browser_client_profile_root_variants
+    test_chrome_browser_client_current_profile_shape
     test_chrome_marketplace_fallback_synthesis
     test_chrome_native_host_manifest_writer
     test_launcher_template_sanity
